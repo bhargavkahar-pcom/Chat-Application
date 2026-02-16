@@ -20,12 +20,14 @@ export default function Chat({ auth, setAuth }) {
   const [selected, setSelected] = useState(null);
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
+  const [isTyping, setIsTyping] = useState(false);
 
   const [toast, setToast] = useState({ open: false, message: "" });
 
   const socketRef = useRef(null);
   const selectedRef = useRef(null);
   const messagesContentRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
 
   useEffect(() => {
     selectedRef.current = selected;
@@ -36,8 +38,6 @@ export default function Chat({ auth, setAuth }) {
   }, [messages]);
 
   useEffect(() => {
-    console.log("ref");
-
     socketRef.current = io("http://localhost:5000", {
       auth: { token: auth.token },
     });
@@ -51,22 +51,36 @@ export default function Chat({ auth, setAuth }) {
 
     // Online users
     socket.on("onlineUsers", (online) => {
-      console.log("r:onlusers", online);
       setUsers((prev) =>
         prev.map((u) => ({ ...u, isOnline: online.includes(u._id) })),
       );
 
       // 🔹 Live update for currently selected user
       setSelected((prev) => {
-        console.log("-->", prev);
         if (!prev) return null;
         return { ...prev, isOnline: online.includes(prev._id) };
       });
     });
 
+    // Typing indicator
+    socket.on("typing", ({ senderId }) => {
+      const currentSelected = selectedRef.current;
+
+      if (currentSelected && senderId === currentSelected._id) {
+        setIsTyping(true);
+      }
+    });
+
+    socket.on("stopTyping", ({ senderId }) => {
+      const currentSelected = selectedRef.current;
+
+      if (currentSelected && senderId === currentSelected._id) {
+        setIsTyping(false);
+      }
+    });
+
     // Private messages
     socket.on("privateMessage", (msg) => {
-      console.log("r:prvmsg", msg, selected);
       const currentSelected = selectedRef.current;
 
       if (
@@ -80,7 +94,6 @@ export default function Chat({ auth, setAuth }) {
 
     // 🔥 Listen for new user joining
     socket.on("userJoined", (user) => {
-      console.log("r:usjo", user);
       setToast({ open: true, message: `${user.username} has joined!` });
       setUsers((prev) => {
         const exists = prev.find((u) => u._id === user._id);
@@ -98,10 +111,49 @@ export default function Chat({ auth, setAuth }) {
     });
 
     return () => {
-      console.log("uNomount");
       socket.disconnect();
     };
   }, []);
+
+  const onSelectUser = async (user) => {
+    setSelected(user);
+    setIsTyping(false);
+
+    const payload = {
+      sender: auth.user._id,
+      receiver: user._id,
+    };
+
+    await axios.post("/messages/user-messages", payload).then((res) => {
+      setMessages(res.data.data);
+    });
+  };
+
+  const onTypingMessage = async (message) => {
+    if (!selected) return;
+
+    setText(message);
+
+    // if (selected._id === auth.user._id) setIsTyping(true);
+
+    socketRef.current.emit("typing", {
+      receiverId: selected._id,
+    });
+
+    // Clear previous timeout
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
+
+    // Emit stopTyping after 1 second of inactivity
+    typingTimeoutRef.current = setTimeout(() => {
+      socketRef.current.emit("stopTyping", {
+        receiverId: selected._id,
+      });
+
+      // if (selected._id === auth.user._id) setIsTyping(false);
+    }, 5000);
+  };
 
   const sendMessage = () => {
     if (!text.trim() || !selected) return;
@@ -112,20 +164,6 @@ export default function Chat({ auth, setAuth }) {
     });
 
     setText("");
-  };
-
-  const onSelectUser = async (user) => {
-    setSelected(user);
-
-    const payload = {
-      sender: auth.user._id,
-      receiver: user._id,
-    };
-
-    await axios.post("/messages/user-messages", payload).then((res) => {
-      console.log(res.data);
-      setMessages(res.data.data);
-    });
   };
 
   const logout = async () => {
@@ -241,6 +279,15 @@ export default function Chat({ auth, setAuth }) {
             </div>
           )}
 
+          {isTyping && (
+            <Typography
+              variant="body2"
+              className="text-green-400 animate-pulse"
+            >
+              {selected.username} is typing...
+            </Typography>
+          )}
+
           {/* Input */}
           {selected && (
             <div className="p-4 flex gap-2 bg-slate-800 border-t border-slate-700">
@@ -248,7 +295,7 @@ export default function Chat({ auth, setAuth }) {
                 fullWidth
                 variant="outlined"
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => onTypingMessage(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault(); // optional, prevents form submission
